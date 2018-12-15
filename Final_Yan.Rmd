@@ -1,0 +1,294 @@
+---
+title: |
+  | \Large{Consumer Responsiveness of Health Care Utilization to Insurance Coverage:}
+  | \Large{An Empirical Analysis Using Multilevel Regression}
+author: "Shengting Yan"
+date: "12/12/2018"
+output:
+  pdf_document: default
+indent: TRUE
+header-includes: \usepackage{setspace}\doublespacing
+abstract: This paper attempts to quantify consumers\' responsiveness to changes in
+  insurance coverage through their utilization of medical services, including physician
+  visits, prescription drugs, preventive care, surgeries, and inpatient and outpatient
+  services. The famous RAND Health Insurance Experiment in 1970s designed a randomized
+  trial to study how different insurance plan coverages can affect people\'s behavior.
+  Researchers observed reduced utilization of care attributable to higher cost-sharing
+  rate, which meant higher cost burden on the patients. While that study proved such
+  a relationship, this study seeks to quantify and estimate the magnitude of this
+  effect. By employing multilevel regression model on a subset of the 2016 MEPS data,
+  the study finds that 1% increase in insurance coverage is associated with 6.1 times
+  rise in health expenditures. While being old, female, white, highly-educated, and
+  in poor health condition would lead people to take advantage of the medical services
+  more frequently, minorities, employed, and those with private insurance use less
+  care. Given the continually rising share of U.S. national health spending of the
+  total GDP, understanding the factors that affect service use can direct policy-makers
+  to design a more cost-efficient medical system to ultimately control cost without
+  undermining the supply and the quality of care.
+---
+```{r loadpackages, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(pastecs)
+library(lattice)
+library(broom)
+library(lme4) # for fixed-effect model
+library(kableExtra) # for table
+library(xtable)
+library(Gmisc)
+library(summarytools)
+library(stargazer) # for table
+library(knitr)
+# library(lmerTest) # for model selection; but is incompatiable with stargazer
+# data <- read_excel("~/Vassar College/senior/2018 Fall/RA/STATA RELATED/final.xlsx")
+```
+
+```{r data cleaning for analysis, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+# convert tibble to data frame
+dt <- as.data.frame(data)
+# keep observations whose age is between 18 and 64 (inclusively)
+dt <- filter(dt,data$AGE16X>17 & data$AGE16X<65)
+# trim certain variables that contain strings
+for (i in c("SEX","RACETHX","INSURC16")) {
+    dt[[i]] <- substr(dt[[i]],1,1)
+}
+for (i in c("HIDEG","RTHLTH31","MNHLTH31","EMPST31H","JTPAIN31", select_vars(names(dt),matches('^.+(DX)$')))) {
+    dt[[i]] <- substr(dt[[i]],1,2)
+}
+# delete observations with invalid responses (could be uncertain, not know, inapplicable, or refused)
+dt <- filter_all(dt,all_vars(.>0))
+######### recode certain variables
+# SEX: change level 1(male) & 2(female) to 0 & 1
+dt$SEX <- as.numeric(dt$SEX)-1
+# EDUC: change to 1 (no degree), 2 (high-school), 3 (other degree), 4 (higher-education degrees)
+for (j in 1:nrow(dt)) {
+    if (as.numeric(dt[j,"HIDEG"])==4 | as.numeric(dt[j,"HIDEG"])==5 | as.numeric(dt[j,"HIDEG"])==6) 
+      dt[j,"HIDEG"] <- 4
+    else if (as.numeric(dt[j,"HIDEG"])==2 | as.numeric(dt[j,"HIDEG"])==3) # medicare and private
+      dt[j,"HIDEG"] <- 2
+    else if (as.numeric(dt[j,"HIDEG"])==7)
+      dt[j,"HIDEG"] <- 3
+    else
+      dt[j,"HIDEG"] <-dt[j,"HIDEG"]
+    }
+# change level 1(yes) & 2(no) to 0 & 1
+for (i in c("JTPAIN31", select_vars(names(dt),matches('^.+(DX)$')))){
+  for (j in 1:nrow(dt)) {
+    ifelse (as.numeric(dt[j,i])==2,dt[j,i] <- 0,dt[j,i] <- 1)
+  }
+}
+# create a new variable indicating the total number of diagnosis one has
+dt$dx <- rowSums(sapply(select(dt,7:19),as.numeric))
+# change level 1(employed) & 2(job to return) & 34(unemploted) to 0 & 1
+dt$EMPST31H <-  ifelse((as.numeric(dt$EMPST31H)==1) | (as.numeric(dt$EMPST31H)==2),
+                       dt$EMPST31H <- 1, dt$EMPST31H<- 0)
+# calculate insurance coverage
+# coverage = 1- (total out-of-pocket/total health expenditure)
+for (i in 1:nrow(dt)) {
+  ifelse(dt[i,"TOTEXP16"]!=0,dt[i,"coverage"] <- round(1-dt[i,"TOTSLF16"]/dt[i,"TOTEXP16"],2), dt[i,"coverage"] <- 0)
+}
+# change column names for easy coding
+colnames(dt) <- c("age","sex","race","educ","hstat","mstat",
+                  tolower(c("JTPAIN31",select_vars(names(dt),matches('^.+(DX)$')))),
+                  "employ","inc","ins","exp","self","family","familyexp","dx", "coverage")
+# keep only insured people
+dt <- filter(dt,as.numeric(dt$ins)!=3)
+# change ins to 0 (any private) & 1 (public only) from 1 (any private) & 2 (public only)
+dt$ins <- as.numeric(dt$ins)-1
+# save the cleaned dataset
+cleaned <- dt
+write.csv(cleaned,file="final_analysis_data.csv",row.names = FALSE)
+```
+
+```{r analysis dataset, message=FALSE, warning=FALSE, include=FALSE, paged.print=TRUE}
+# read in the analysis dataset
+dt <- read.csv("final_analysis_data.csv")
+dt <- dt[,-c(7:19,24,26)]
+# convert all variables to numeric format
+for (i in c("age","inc","exp","dx")){
+  dt[[i]] <- as.numeric(dt[[i]])
+}
+for (i in c("sex","race","educ","employ","ins","mstat","hstat")){
+  dt[[i]] <- as.factor(dt[[i]])
+}
+# add labels
+dt$sex <- factor(dt$sex,labels = c("Male","Female"))
+dt$race <- factor(dt$race,levels = c(1:5),labels = c("Hispanic","White Only", "Black Only","Asian Only","Multiple Race"))
+dt$educ <- factor(dt$educ,levels = 1:4, labels = c("No Degree", "High School Degree", "Other degree", "Higher-education Degree"))
+dt$hstat <- factor(dt$hstat,levels = 1:5, labels = c("Excellent","Very Good","Good","Fair","Poor"))
+dt$mstat <- factor(dt$mstat,levels = 1:5, labels = c("Excellent","Very Good","Good","Fair","Poor"))
+dt$employ <- factor(dt$employ,labels = c("Unemployed","Employed"))
+dt$ins <- factor(dt$ins, labels = c("Public Only", "Private Only"))
+# create a subset used for analysis
+dt$logexp <- log(dt$exp)
+dt <- dt %>% dplyr::select("family","logexp","coverage",everything())
+dt <- dt[order(dt$family,dt$coverage),]
+```
+
+```{r EDA, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+######### visualize expenditure
+dt %>% ggplot(aes(x=exp))+geom_histogram()
+# since exp is heavily right-skewed, i log-transformed it
+dt %>% ggplot(aes(x=log(exp)))+geom_histogram() +
+  xlab("log of individual-level total health expenditure in 2016") + 
+  ylab("Count") + theme_bw() + geom_density(aes(y=0.45*..count..))
+######### visualize the relationship between logexp and all predictors
+dt %>% ggplot(aes(y=logexp,x=age)) + geom_point() + 
+  geom_smooth(method="lm")
+dt %>% ggplot(aes(y=logexp,x=sex)) + geom_boxplot() + 
+  geom_smooth(method="lm")
+dt %>% ggplot(aes(y=logexp,x=race)) + geom_boxplot() + 
+  geom_smooth(method="lm")
+dt %>% ggplot(aes(y=logexp,x=educ)) + geom_boxplot() + 
+  geom_smooth(method="lm")
+dt %>% ggplot(aes(y=logexp,x=hstat)) + geom_boxplot() + 
+  geom_smooth(method="lm")
+dt %>% ggplot(aes(y=logexp,x=mstat)) + geom_boxplot() + 
+  geom_smooth(method="lm")
+dt %>% ggplot(aes(y=logexp,x=employ)) + geom_boxplot() + 
+  geom_smooth(method="lm")
+dt %>% ggplot(aes(y=logexp,x=inc)) + geom_point() + 
+  geom_smooth(method="lm")
+dt %>% ggplot(aes(y=logexp,x=ins)) + geom_boxplot() + 
+  geom_smooth(method="lm")
+dt %>% ggplot(aes(y=logexp,x=dx)) + geom_point() + 
+  geom_smooth(method="lm")
+dt %>% ggplot(aes(y=logexp,x=coverage,color=coverage)) + geom_point() + geom_smooth(method="lm") +
+  ylab("log of individual-level total health expenditure in 2016") + 
+  xlab("Insurance Coverage") + theme_bw()
+dt %>% ggplot(aes(y=logexp,x=coverage)) + geom_bin2d()
+```
+
+```{r fitting models, echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+###### random intercepts, fixed slope
+fit1 <- lmer(logexp ~ . -family -exp + (1 | family),dt)
+# summary(fit1)
+# plot(fit1)
+
+# compute Intraclass Correlation Coefficient
+ICC.Model<-function(Model.Name) {
+  tau.Null<-as.numeric(lapply(summary(Model.Name)$varcor, diag))
+  sigma.Null <- as.numeric(attr(summary(Model.Name)$varcor, "sc")^2)
+  ICC.Null <- tau.Null/(tau.Null+sigma.Null)
+  return(ICC.Null)
+  }
+icc <- ICC.Model(fit1)
+confint <- exp(confint(fit1))
+# model selection for multilevel
+#fit <- lmer(logexp ~coverage+age+sex+race+educ+hstat+mstat+employ+inc+ins+dx+ (1|family),data=dt)
+#selectFit <- get_model(step(fit))
+
+##### multiple linear regression
+mlrfit <- glm(logexp ~ . -family -exp,data = dt)
+# summary(mlrfit)
+# plot(mlrfit)
+test <- anova(fit1,mlrfit)
+```
+  
+
+# Introduction
+Health spending has always been a debated topic in the United States. In recent decades, U.S. national health spending has more than doubled from \$1.4 trillion in 2000 to \$3.3 trillion in 2016, which constituted 18% of GDP (Kamal & Cox, 2017). In 2017, the average amount spent on healthcare per person in comparable countries (\$5,198) was half that of the U.S. (\$10,348). Researchers and the government have been seeking effective methods to control the cost without jeopardizing the supply and the quality of care.    
+
+Total health expenditure represents the amount spent on healthcare and health-related activities, such as administration of insurance and health research. It is a function of both price paid to providers or for drugs and the volume of services used (Kamal & Cox). This paper in particular focuses on the utilization of services in the private sector and seeks to identify factors that can affect the use. Generally, insurance is found to increase the intensity of utilization and reduce out-of-pocket spending (Ekman, 2007). Brook et al. (2006) find that increasing cost sharing rate reduces the use of health services, manifested by less doctor visits, including dental visits, prescriptions, and mental health treatments, and fewer hospitalization. Their results are drawn from the RAND Health Insurance Experiment conducted between 1971 and 1982, where participants were randomly assigned to four kinds of cost-sharing insurance plans with 0% (free), 25%, 50%, and 95% coinsurance rates. While that study employed randomized trial experiment design and analyzed the change in consumer behavior attributable to changes in coinsurance rate, this paper attempts to quantify this relationship and estimates the magnitude of the effect of insurance coverage on health care utilization.
+   
+# Methods
+### Data and Variables
+The Medical Expenditure Panel Survey (MEPS), which began in 1996, is a set of large-scale surveys of families, their medical providers, and employers across the United States sponsored by the Agency for Healthcare Research (Healthcare Research, 2009). It has two major components: the Household Component and the Insurance Component. This study uses the former from 2016, which collects data from sampled families drawn from a nationally representative subsample of households that participated in the prior year's National Health Interview Survey and whose data files are publicly available. MEPS collects detailed information on demographics, health history, insurance, medical care use and expenses from each household member during household interviews. All data for a sampled household are reported by a single household respondent. In 2016, 34655 persons from 13587 families were interviewed.   
+
+The study sample is restricted to persons who are between 18 and 64 years of age in 2016. Observations with missing responses and those uninsured are removed. The dependent variable is log transformed total health-related expenditures for each individual. I use it as a measure for utilization of medical services. The variable of interest is coverage, calculated by dividing the total amount self-paid by total expenditures. This variable aims to approximate the cost-sharing percentage for each insured individual. Other selected covariates are: gender, age, race, education, employment status, income, insurance type (public and private), self-rated health and mental health status on a scale of 1 (excellent) to 5 (poor), and the number of prior diagnosis of illnesses including high blood pressure, coronary heart disease, angina, myocardial infarction, other unspecified heart disease, stroke, emphysema, high cholesterol, cancer, diabetes, joint pain, arthritis, and asthma. More detailed information is available in the codebook. 
+   
+### Statistical Analysis
+Given the nested nature of the data, which means that individuals are clustered within households, I use a multilevel regression model. Multilevel model attributes variations in the outcome variable to variations between individuals (first-level) and those between households (second-level) (Gelman & Hill, 2017). I assume a random intercept model since the study focuses on how people respond to insurance coverage in general rather than how different context characteristics (i.e. household) affect such responsiveness.
+
+I performed statistical analyses using RStudio version 1.1.456. I constructed a full multilevel model using all covariates and then conducted model selection employing both forward stepwise and backward elimination methods based on improvement in the Akaike information criterion. To test whether using a multilevel model is necessary, the final model was compared to a multiple linear regression model with the same sets of covariates. For statistical inference, I conducted 2-tailed tests with $p\leq 0.05$ considered to be significant.  
+
+# Results
+Characteristics of the analytic sample by gender are shown in Table 1. In total, there are `r nrow(dt)` individuals from `r length(unique(dt$family))` households. The number of individuals within a same household is between 1 (`r round(sum(table(dt$family)==1)/nrow(dt)*100,2)`%) and 5 (`r round(sum(table(dt$family)==5)/nrow(dt)*100,2)`%). There are `r sum(dt$sex=="Male")` (`r round(sum(dt$sex=="Male")/nrow(dt)*100,2)`%) males and `r sum(dt$sex=="Female")` (`r round(sum(dt$sex=="Female")/nrow(dt)*100,2)`%) females, with mean age as 44 (±12.8) and 43 (±12.8). `r round(sum(dt$race=="White Only")/nrow(dt)*100,2)`% are white. `r round(sum(dt$educ=="Higher-education Degree")/nrow(dt)*100,2)`% have a higher education degree. `r round(sum(dt$hstat=="Excellent")/nrow(dt)*100,2)`% self-reported an excellent health status. `r round(sum(dt$employ=="Employed")/nrow(dt)*100,2)`% are employed and have an average income level of \$$52009.47$ (±\$$42714.98$).
+The mean expenditures for male is \$`r round(mean(subset(dt,sex =="Male")$exp),2)` (±\$$14016.42$) and for female is \$`r round(mean(subset(dt, sex == "Female")$exp),2)` (±\$$17420.72$). The mean coverage for the sample is `r round(mean(dt$coverage),2)` (±$0.28$).
+   
+Table 2 presents the results from a multilevel regression and a multiple linear regression. These are the final models given that no variable has been removed from the model selection process. Note that the coefficients have been exponentiated for easier interpretation. The multilevel model shows that consumers are very responsive to insurance coverage in terms of their utilization pattern. 1% increase in insurance coverage would lead to `r round(exp(summary(fit1)$coefficients[2,1])-1,2)` (95%CI, `r round(confint[4,1]-1,2)`-`r round(confint[4,2]-1,2)`) times increase in total health expenditures after adjusted for other covariates in the model. Characteristics that are associated with higher utilization of medical services include being old (`r round(exp(summary(fit1)$coefficients[3,1]),2)`; 95%CI, `r round(confint[5,1],2)`-`r round(confint[5,2] ,2)`), being a female (`r round(exp(summary(fit1)$coefficients[4,1]) ,2)`; 95%CI, `r round(confint[6,1] ,2)`-`r round(confint[6,2] ,2)`),  being white (`r round(exp(summary(fit1)$coefficients[5,1]) ,2)`; 95%CI, `r round(confint[7,1] ,2)`-`r round(confint[7,2] ,2)`), being highly-educated (`r round(exp(summary(fit1)$coefficients[12,1]) ,2)`; 95%CI, `r round(confint[14,1] ,2)`-`r round(confint[14,2] ,2)`), having poor health status (`r round(exp(summary(fit1)$coefficients[15,1]) ,2)`; 95%CI, `r round(confint[17,1] ,2)`-`r round(confint[17,2] ,2)`), and having more previously diagnosed diseases (`r round(exp(summary(fit1)$coefficients[23,1]) ,2)`; 95%CI, `r round(confint[25,1] ,2)`-`r round(confint[25,2] ,2)`). Being a minority is predicted to have less use of medical care. Employed population (`r round(exp(summary(fit1)$coefficients[20,1]) ,2)`; 95%CI, `r round(confint[22,1] ,2)`-`r round(confint[22,2] ,2)`) reduce their use of care as well as those with private insurance plans (`r round(exp(summary(fit1)$coefficients[22,1]) ,2)`; 95%CI, `r round(confint[24,1] ,2)`-`r round(confint[24,2] ,2)`).
+
+A multiple linear regression model was used to test the hypothesis that whether a multilevel model is necessary for this sample. As one can notice, the estimated coefficients are very similar. An anova test shows a p-value of $`r round(test$Pr[2],6)`$, implying that despite the little difference in estimated values, a multilevel model is indeed more suitable given the clustered nature of the data.
+
+# Discussion
+The direction of correlation for certain covariates are consistent with the findings documented by other researchers. For example, Yang, Norton, and Stearns contend that health expenses for elderly people increase substantially with age due to increasing use of inpatient service and long-term care (2003). Bertakis, Azari, Helms, Callahan, and Robbins conclude that women have higher medical care service utilization, such as primary care visits and diagnostic services, and higher associated charges than men (2000). Minorities are predicted to use fewer medical service possibly due to limited access to care or fewer employee benefits given a higher level of unemployment. The possibility of bearing potentially exorbitant medical bills reduces their tendency to use care. Interestingly, highly-educated people utilize more health service. While Cutler & Lleras-Muney find a positive relationship between education and health: “an additional four years of education lowers five-year mortality by $1.8$ percentage points", their opportunity cost of being sick is likely to be higher and thus they spend more time and effort to stay healthy by visiting doctors more (2006).
+
+One limitation of the study lies in the outcome variable. Provided that I use medical expenditures to approximate utilization and compare them for individuals from a national sample, I neglect the influence of prices across different regions. Future studies should use price-adjusted measurements of utilization. Moreover, considering that a single respondent completed the survey for all members in a household, input error is unavoidable. This could explain why coefficients for mental status variables are not significant. Since people value their privacy and mental health can be a taboo even between family members, having a person report mental status for other people is certainly susceptible to falsifications of reality. 
+
+On the implication side, while the model possesses predictive ability for medical care use, the outcome variable certainly does not suggest anything about individual's potential health outcome. The audience should take care when interpretating the coefficients and their implications. Particularly, a higher utilization does not necessarily imply an overuse of resources or an existence of moral hazard. For example, an increase in preventive care should not be discouraged as it hedges people from future catastrophic spendings. Learning about what kind of services each person uses would be extremely useful in deciding the channels through which insurance coverage affects people's consumption pattern of medical care.
+   
+# Conclusion
+The basic economic theory asserts that people have unlimited wants but are subject to limited resources. A budget constraint leads people to be very responsive to their insurance coverage, which specifies the percentage they are responsible for a medical service. Such a responsiveness is manifested through their consumption pattern of health-related services. By analyzing 2016 MEPS Household Component data with multilevel regression model, this study attains a quantitative measure of the maginitude of which people's medical care service utilization is influenced by their insurance plans' cost-sharing rates. Other characteristics of the insured, including gender, race, education, and age, are also found to be significant in affecting the use. In the context of a growing U.S. national health spending and a goal to restrain total cost and maintain a quality provision, unraveling the factors that contribute to the growth, whether due to rises in price or in demand for services, merits continued attention.
+
+\newpage
+# References   
+Bertakis, K. D., Azari, R., Helms, L. J., Callahan, E. J., & Robbins, J. A. (2000, February). Gender Differences in the Utilization of Health Care Services. Journal of Family Practice, 49(2), 147. Retrieved from https://link.galegroup.com/apps/doc/A60039859/AONE?u=bron88970&sid=AONE&xid=c32d0ace   
+   
+Brook, R. H., Keeler, E. B., Lohr, K. N., Newhouse, J. P., Ware, J. E., Rogers W. H.,... Reboussin, B. (2006). The Health Insurance Experiment: A Classic RAND Study Speaks to the Current Health Care Reform Debate. Santa Monica, CA: RAND Corporation.
+   
+Cutler, D.M., & Lleras-Muney, A. (2006). Education and health: evaluating theories and
+evidence. National Bureau of Economic Research, working paper 12532. doi:
+10.3386/w12352
+   
+Ekman, B. (2007). The impact of health insurance on outpatient utilization and
+expenditure: Evidence from one middle-income country using national household survey
+data. Health Research Policy and Systems,5(1), 5-6. doi:10.1186/1478-4505-5-6   
+   
+Gelman, A., & Hill, J. (2017). Data analysis using regression and multilevel/hierarchical models. Cambridge: Cambridge University Press.
+   
+Healthcare Research. (2009, August 21). Survey Background. Retrieved December 9, 2018, from https://meps.ahrq.gov/mepsweb/about_meps/survey_back.jsp
+   
+Kamal, R., & Cox, C. (2017, December 20). How has U.S. spending on healthcare changed over time? Retrieved December 9, 2018, from https://www.healthsystemtracker.org/chart-collection/u-s-spending-healthcare-changed-time/#item-per-capita-basis-health-spending-grown-substantially_2017
+   
+Yang, Z., Norton, C. E., & Stearns, C. S. (2003, January 1). Longevity and Health Care Expenditures: The Real Reasons Older People Spend More. The Journals of Gerontology: Series B, 58(1), S2–S10. doi:10.1093/geronb/58.1.s2
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='asis'}
+library(qwraps2)
+dtsub <- dt %>% dplyr::select("sex","age","race","educ","employ","inc","ins","coverage","hstat","mstat","dx","exp")
+summary1 <-
+  list("Age" =list("mean (sd)" = ~ qwraps2::mean_sd(age)),
+       "Race" =
+       list("Hispanic" = ~ qwraps2::n_perc0(as.numeric(race) ==1),
+            "While Only" = ~ qwraps2::n_perc0(as.numeric(race)==2),
+            "Black Only"= ~ qwraps2::n_perc0(as.numeric(race)==3),
+            "Asian Only"= ~ qwraps2::n_perc0(as.numeric(race)==4)),
+       "Education" =
+       list("High School Degree"= ~ qwraps2::n_perc0(as.numeric(educ) ==2),
+            "Other degree"= ~ qwraps2::n_perc0(as.numeric(educ) ==3),
+            "Higher-education Degree"= ~ qwraps2::n_perc0(as.numeric(educ) ==4)),
+       "Employment" =
+         list("Unemployed"= ~ qwraps2::n_perc0(as.numeric(employ) ==1),
+              "Employed"= ~ qwraps2::n_perc0(as.numeric(employ) ==2)),
+       "Income"=list("mean (sd)" = ~ qwraps2::mean_sd(inc)),
+       "Insurance Type"=
+         list("Public Only"= ~ qwraps2::n_perc0(as.numeric(ins) ==1),
+              "Private Only"= ~ qwraps2::n_perc0(as.numeric(ins) ==2)),
+       "Coverage"=list("mean (sd)" = ~ qwraps2::mean_sd(coverage)),
+       "Health Status"=
+         list("Excellent"= ~ qwraps2::n_perc0(as.numeric(hstat) ==1),
+              "Very Good"= ~ qwraps2::n_perc0(as.numeric(hstat) ==2),
+              "Good"= ~ qwraps2::n_perc0(as.numeric(hstat) ==3),
+              "Fair"= ~ qwraps2::n_perc0(as.numeric(hstat) ==4),
+              "Poor"= ~ qwraps2::n_perc0(as.numeric(hstat) ==5)),
+       # "Mental Status"=
+       #   list("Excellent"= ~ qwraps2::n_perc0(as.numeric(hstat) ==1),
+       #        "Very Good"= ~ qwraps2::n_perc0(as.numeric(hstat) ==2),
+       #        "Good"= ~ qwraps2::n_perc0(as.numeric(hstat) ==3),
+       #        "Fair"= ~ qwraps2::n_perc0(as.numeric(hstat) ==4),
+       #        "Poor"= ~ qwraps2::n_perc0(as.numeric(hstat) ==5)),
+       "Prior Diagnosis"=list("mean (sd)" = ~ qwraps2::mean_sd(dx)),
+       "Expenditure"=list("mean (sd)" = ~ qwraps2::mean_sd(exp))
+       )
+p1 <- summary_table(dplyr::group_by(dtsub, sex),summary1)
+                   
+print(p1, rtitle = "Table 1: Characteristics of the Sample by Gender",
+                    cnames = c("Male (N=4652)", "Female (N=6008)"))
+```
+\setcounter{table}{1}
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE, results='asis'}
+dtsub <- dt %>% dplyr::select("sex","age","race","educ","employ","inc","ins","coverage","hstat","mstat","dx","exp")
+
+stargazer(fit1,mlrfit,title = "Regression Results from a Multilevel Model and a Multiple Linear Model",omit.stat=c("LL"), header = FALSE,no.space = TRUE,digits = 2,covariate.labels =  c("Intercept","Coverage", "Age", "Female","White Only", "Black Only","Asian Only","Multiple Race","High School Degree", "Other degree", "Higher-education Degree","Health: Very Good","Health: Good","Health: Fair","Health: Poor","Mental: Very Good","Mental: Good","Mental: Fair","Mental: Poor","Employed","Income","Private Insurance", "Prior Diagonosis"), single.row = TRUE,intercept.bottom = FALSE, intercept.top = TRUE,table.placement = 'H',apply.coef = exp,dep.var.labels="Log(Total Expenditures)",model.numbers = FALSE)
+```
+
